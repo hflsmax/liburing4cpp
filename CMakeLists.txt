@@ -59,6 +59,8 @@ target_link_libraries(
 
 if (PROJECT_IS_TOP_LEVEL)
     note("${PROJECT_NAME} is top level. Building demo projects")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g2")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lstdc++")
     # Target all the source files in demo
     add_source_dir("demo" ${libname})
 

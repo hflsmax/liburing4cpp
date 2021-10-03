@@ -16,6 +16,8 @@
 #include <liburing/task.hpp>
 #include <liburing/utils.hpp>
 
+#include "ctpl_stl.h"
+
 #ifdef LIBURING_VERBOSE
 #   define puts_if_verbose(x) puts(x)
 #   define printf_if_verbose(...) printf(__VA_ARGS__)
@@ -657,16 +659,20 @@ public:
      */
     template <typename T, bool nothrow>
     T run(const task<T, nothrow>& t) noexcept(nothrow) {
+        ctpl::thread_pool p(3);
         while (!t.done()) {
-            io_uring_submit_and_wait(&ring, 1);
+            // io_uring_submit_and_wait(&ring, 1);
+            io_uring_submit(&ring);
 
             io_uring_cqe *cqe;
             unsigned head;
 
             io_uring_for_each_cqe(&ring, head, cqe) {
-                ++cqe_count;
-                auto coro = static_cast<resolver *>(io_uring_cqe_get_data(cqe));
-                if (coro) coro->resolve(cqe->res);
+              ++cqe_count;
+              auto coro = static_cast<resolver *>(io_uring_cqe_get_data(cqe));
+              if (coro) {
+                p.push([=](int) { coro->resolve(cqe->res); });
+              };
             }
 
             printf_if_verbose(__FILE__ ": Found %u cqe(s), looping...\n", cqe_count);
