@@ -638,6 +638,7 @@ public:
      */
     [[nodiscard]]
     io_uring_sqe* io_uring_get_sqe_safe() noexcept {
+        sq_mutex.lock_shared();
         auto* sqe = io_uring_get_sqe(&ring);
         if (__builtin_expect(!!sqe, true)) {
             return sqe;
@@ -659,10 +660,12 @@ public:
      */
     template <typename T, bool nothrow>
     T run(const task<T, nothrow>& t) noexcept(nothrow) {
-        ctpl::thread_pool p(3);
+        // ctpl::thread_pool p(3);
         while (!t.done()) {
             // io_uring_submit_and_wait(&ring, 1);
+            sq_mutex.lock();
             io_uring_submit(&ring);
+            sq_mutex.unlock();
 
             io_uring_cqe *cqe;
             unsigned head;
@@ -671,7 +674,8 @@ public:
               ++cqe_count;
               auto coro = static_cast<resolver *>(io_uring_cqe_get_data(cqe));
               if (coro) {
-                p.push([=](int) { coro->resolve(cqe->res); });
+                coro->resolve(cqe->res);
+                // p.push([=](int) { coro->resolve(cqe->res); });
               };
             }
 

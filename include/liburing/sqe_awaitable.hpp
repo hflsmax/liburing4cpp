@@ -5,8 +5,11 @@
 #include <type_traits>
 #include <optional>
 #include <cassert>
+#include <shared_mutex>
 
 #include <liburing/stdlib_coroutine.hpp>
+
+std::shared_mutex sq_mutex;
 
 namespace uio {
 struct resolver {
@@ -78,6 +81,7 @@ struct sqe_awaitable {
             void await_suspend(std::coroutine_handle<> handle) noexcept {
                 resolver.handle = handle;
                 io_uring_sqe_set_data(sqe, &resolver);
+                sq_mutex.unlock_shared();
             }
 
             constexpr int await_resume() const noexcept { return resolver.result; }
