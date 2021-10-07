@@ -6,10 +6,37 @@
 #include <optional>
 #include <cassert>
 #include <shared_mutex>
-
 #include <liburing/stdlib_coroutine.hpp>
 
-std::shared_mutex sq_mutex;
+struct spinlock {
+  std::atomic<bool> lock_ = {0};
+
+  void lock() noexcept {
+    for (;;) {
+      // Optimistically assume the lock is free on the first try
+      if (!lock_.exchange(true, std::memory_order_acquire)) {
+        return;
+      }
+      // Wait for lock to be released without generating cache misses
+      while (lock_.load(std::memory_order_relaxed)) {}
+    }
+  }
+
+  bool try_lock() noexcept {
+    // First do a relaxed load to check if lock is free in order to prevent
+    // unnecessary cache misses if someone does while(!try_lock())
+    return !lock_.load(std::memory_order_relaxed) &&
+           !lock_.exchange(true, std::memory_order_acquire);
+  }
+
+  void unlock() noexcept {
+    lock_.store(false, std::memory_order_release);
+  }
+};
+
+struct spinlock spin;
+std::mutex sq_mutex;
+
 
 namespace uio {
 struct resolver {
@@ -21,7 +48,11 @@ struct resume_resolver final: resolver {
 
     void resolve(int result) noexcept override {
         this->result = result;
-        handle.resume();
+    }
+
+    void resume() {
+      fmt::print("resume on {}\n", handle.address());
+      handle.resume();
     }
 
 private:
@@ -79,9 +110,11 @@ struct sqe_awaitable {
             constexpr bool await_ready() const noexcept { return false; }
 
             void await_suspend(std::coroutine_handle<> handle) noexcept {
+                fmt::print("provide handle, {}\n", handle.address());
                 resolver.handle = handle;
                 io_uring_sqe_set_data(sqe, &resolver);
-                sq_mutex.unlock_shared();
+                sq_mutex.unlock();
+                // fmt::print("await_suspend\n");
             }
 
             constexpr int await_resume() const noexcept { return resolver.result; }

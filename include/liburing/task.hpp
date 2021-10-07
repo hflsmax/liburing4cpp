@@ -4,6 +4,7 @@
 #include <variant>
 #include <array>
 #include <cassert>
+#include <thread>
 
 #include <liburing/stdlib_coroutine.hpp>
 
@@ -29,8 +30,10 @@ struct task_promise_base {
                     }
                     std::coroutine_handle<task_promise_base>::from_promise(*me_).destroy();
                 } else if (me_->waiter_) {
+                    fmt::print("final_suspend with waiter\n");
                     return me_->waiter_;
                 }
+                fmt::print("final_suspend WITHOUT waiter\n");
                 return std::noop_coroutine();
             }
         };
@@ -83,6 +86,15 @@ struct task_promise<void, nothrow> final: task_promise_base<void, nothrow> {
     }
 };
 
+void bt() {
+  void *array[10];
+  size_t size;
+
+  size = backtrace(array, 10);
+
+  backtrace_symbols_fd(array, size, STDERR_FILENO);
+}
+
 /**
  * An awaitable object that returned by an async function
  * @tparam T value type holded by this task
@@ -104,6 +116,9 @@ struct task final {
 
     template <typename T_, bool nothrow_>
     void await_suspend(std::coroutine_handle<task_promise<T_, nothrow_>> caller) noexcept {
+        fmt::print("provide waiter_, {}\n", caller.address());
+        // race condition can be more easily produced with this sleep
+        std::this_thread::sleep_for(std::chrono::nanoseconds(100000));
         coro_.promise().waiter_ = caller;
     }
 

@@ -43,10 +43,12 @@ public:
     io_service(int entries = 64, uint32_t flags = 0, uint32_t wq_fd = 0) {
         io_uring_params p = {
             .flags = flags,
+            // .sq_thread_idle = 2000,
             .wq_fd = wq_fd,
         };
 
-        io_uring_queue_init_params(entries, &ring, &p) | panic_on_err("queue_init_params", false);
+        // io_uring_queue_init_params(entries, &ring, &p) | panic_on_err("queue_init_params", false);
+        io_uring_queue_init(entries, &ring, 0) | panic_on_err("queue_init_params", false);
 
         auto* probe = io_uring_get_probe_ring(&ring);
         on_scope_exit free_probe([=]() { io_uring_free_probe(probe); });
@@ -638,11 +640,13 @@ public:
      */
     [[nodiscard]]
     io_uring_sqe* io_uring_get_sqe_safe() noexcept {
-        sq_mutex.lock_shared();
+        sq_mutex.lock();
+        // fmt::print("io_uring_get_sqe\n");
         auto* sqe = io_uring_get_sqe(&ring);
         if (__builtin_expect(!!sqe, true)) {
             return sqe;
         } else {
+            assert(false);
             printf_if_verbose(__FILE__ ": SQ is full, flushing %u cqe(s)\n", cqe_count);
             io_uring_cq_advance(&ring, cqe_count);
             cqe_count = 0;
@@ -660,12 +664,54 @@ public:
      */
     template <typename T, bool nothrow>
     T run(const task<T, nothrow>& t) noexcept(nothrow) {
-        // ctpl::thread_pool p(3);
+        ctpl::thread_pool p(2);
+        std::thread submitter ([&](){
+            while (!t.done()) {
+                sq_mutex.lock();
+                io_uring_submit(&ring);
+                sq_mutex.unlock();
+                // std::this_thread::sleep_for(std::chrono::nanoseconds(100000));
+            }
+        });
+        std::thread resumer ([&](){
+            while (!t.done()) {
+                io_uring_cqe *cqe;
+                unsigned head;
+
+                sq_mutex.lock();
+                io_uring_for_each_cqe(&ring, head, cqe) {
+                  ++cqe_count;
+                  auto coro =
+                      static_cast<resume_resolver *>(io_uring_cqe_get_data(cqe));
+                  if (coro) {
+                    coro->resolve(cqe->res);
+                    auto coro_deref = *coro;
+                    p.push([=](int) mutable {
+                      coro_deref.resume();
+                    });
+                  };
+                }
+                printf_if_verbose(__FILE__ ": Found %u cqe(s), looping...\n", cqe_count);
+                
+                io_uring_cq_advance(&ring, cqe_count);
+                sq_mutex.unlock();
+                cqe_count = 0;
+            }
+        });
+        submitter.join();
+        resumer.join();
+
+        /*
         while (!t.done()) {
-            // io_uring_submit_and_wait(&ring, 1);
+
             sq_mutex.lock();
-            io_uring_submit(&ring);
+            // fmt::print("lock then sleep\n");
+            // std::this_thread::sleep_for(std::chrono::nanoseconds(100000000));
+            // io_uring_submit(&ring);
+            io_uring_submit_and_wait(&ring, 1);
+            // fmt::print("after submit\n");
             sq_mutex.unlock();
+            // std::this_thread::sleep_for(std::chrono::nanoseconds(100000));
 
             io_uring_cqe *cqe;
             unsigned head;
@@ -674,16 +720,20 @@ public:
               ++cqe_count;
               auto coro = static_cast<resolver *>(io_uring_cqe_get_data(cqe));
               if (coro) {
-                coro->resolve(cqe->res);
-                // p.push([=](int) { coro->resolve(cqe->res); });
+                // coro->resolve(cqe->res);
+                p.push([=](int) {
+                  
+                  coro->resolve(cqe->res);
+                });
               };
             }
-
             printf_if_verbose(__FILE__ ": Found %u cqe(s), looping...\n", cqe_count);
+            fmt::print("{}\n", cqe_count);
 
             io_uring_cq_advance(&ring, cqe_count);
             cqe_count = 0;
         }
+        */
 
         return t.get_result();
     }
