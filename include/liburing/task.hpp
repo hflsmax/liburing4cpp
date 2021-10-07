@@ -22,7 +22,7 @@ struct task_promise_base {
             task_promise_base *me_;
 
             Awaiter(task_promise_base *me): me_(me) {};
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) const noexcept {
+            std::coroutine_handle<> await_suspend(__attribute__((unused)) std::coroutine_handle<> caller) const noexcept {
                 if (__builtin_expect(me_->result_.index() == 3, false)) {
                     // FIXME: destroy current coroutine; otherwise memory leaks.
                     if (me_->waiter_) {

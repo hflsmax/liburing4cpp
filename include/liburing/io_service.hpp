@@ -406,7 +406,7 @@ public:
         int fd,
         sockaddr *addr,
         socklen_t addrlen,
-        int flags = 0,
+        __attribute__((unused)) int flags = 0,
         uint8_t iflags = 0
     ) noexcept {
         auto* sqe = io_uring_get_sqe_safe();
