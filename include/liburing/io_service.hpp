@@ -670,7 +670,6 @@ public:
                 sq_mutex.lock();
                 io_uring_submit(&ring);
                 sq_mutex.unlock();
-                // std::this_thread::sleep_for(std::chrono::nanoseconds(100000));
             }
         });
         std::thread resumer ([&](){
