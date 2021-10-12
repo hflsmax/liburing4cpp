@@ -57,26 +57,17 @@ struct sqe_awaitable {
     // TODO: use cancel_token to implement cancellation
     sqe_awaitable(io_uring_sqe* sqe) noexcept: sqe(sqe) {}
 
-    auto operator co_await() {
-        struct await_sqe {
-            resume_resolver resolver {};
-            io_uring_sqe* sqe;
+    resume_resolver resolver {};
 
-            await_sqe(io_uring_sqe* sqe): sqe(sqe) {}
+    constexpr bool await_ready() const noexcept { return false; }
 
-            constexpr bool await_ready() const noexcept { return false; }
-
-            void await_suspend(std::coroutine_handle<> handle) noexcept {
-                resolver.handle = handle;
-                io_uring_sqe_set_data(sqe, &resolver);
-                sq_mutex.unlock();
-            }
-
-            constexpr int await_resume() const noexcept { return resolver.result; }
-        };
-
-        return await_sqe(sqe);
+    void await_suspend(std::coroutine_handle<> handle) noexcept {
+        resolver.handle = handle;
+        io_uring_sqe_set_data(sqe, &resolver);
+        sq_mutex.unlock();
     }
+
+    constexpr int await_resume() const noexcept { return resolver.result; }
 
 private:
     io_uring_sqe* sqe;
