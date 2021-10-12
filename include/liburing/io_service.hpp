@@ -641,12 +641,10 @@ public:
     [[nodiscard]]
     io_uring_sqe* io_uring_get_sqe_safe() noexcept {
         sq_mutex.lock();
-        // fmt::print("io_uring_get_sqe\n");
         auto* sqe = io_uring_get_sqe(&ring);
         if (__builtin_expect(!!sqe, true)) {
             return sqe;
         } else {
-            assert(false);
             printf_if_verbose(__FILE__ ": SQ is full, flushing %u cqe(s)\n", cqe_count);
             io_uring_cq_advance(&ring, cqe_count);
             cqe_count = 0;
@@ -662,8 +660,8 @@ public:
      * @see io_uring_enter(2)
      * @return a pair of promise pointer (used for resuming suspended coroutine) and retcode of finished command
      */
-    template <typename T, bool nothrow>
-    T run(const task<T, nothrow>& t) noexcept(nothrow) {
+    template <typename T, bool nothrow, bool entry_task>
+    T run(const task<T, nothrow, entry_task>& t) noexcept(nothrow) {
         ctpl::thread_pool p(2);
         std::thread submitter ([&](){
             while (!t.done()) {
@@ -678,21 +676,26 @@ public:
                 unsigned head;
 
                 sq_mutex.lock();
+                
+                std::vector<std::coroutine_handle<>> handles_ready;
                 io_uring_for_each_cqe(&ring, head, cqe) {
                   ++cqe_count;
                   auto coro =
                       static_cast<resume_resolver *>(io_uring_cqe_get_data(cqe));
                   if (coro) {
-                    coro->resolve(cqe->res);
-                    auto coro_deref = *coro;
-                    p.push([=](int) mutable {
-                      coro_deref.resume();
-                    });
+                    auto handle = coro->resolve(cqe->res);
+                    handles_ready.emplace_back(handle);
                   };
                 }
                 printf_if_verbose(__FILE__ ": Found %u cqe(s), looping...\n", cqe_count);
-                
                 io_uring_cq_advance(&ring, cqe_count);
+
+                for (auto handle: handles_ready) {
+                    p.push([=](int) mutable {
+                        handle.resume();
+                    });
+                }
+                
                 sq_mutex.unlock();
                 cqe_count = 0;
             }
@@ -700,39 +703,6 @@ public:
         submitter.join();
         resumer.join();
 
-        /*
-        while (!t.done()) {
-
-            sq_mutex.lock();
-            // fmt::print("lock then sleep\n");
-            // std::this_thread::sleep_for(std::chrono::nanoseconds(100000000));
-            // io_uring_submit(&ring);
-            io_uring_submit_and_wait(&ring, 1);
-            // fmt::print("after submit\n");
-            sq_mutex.unlock();
-            // std::this_thread::sleep_for(std::chrono::nanoseconds(100000));
-
-            io_uring_cqe *cqe;
-            unsigned head;
-
-            io_uring_for_each_cqe(&ring, head, cqe) {
-              ++cqe_count;
-              auto coro = static_cast<resolver *>(io_uring_cqe_get_data(cqe));
-              if (coro) {
-                // coro->resolve(cqe->res);
-                p.push([=](int) {
-                  
-                  coro->resolve(cqe->res);
-                });
-              };
-            }
-            printf_if_verbose(__FILE__ ": Found %u cqe(s), looping...\n", cqe_count);
-            fmt::print("{}\n", cqe_count);
-
-            io_uring_cq_advance(&ring, cqe_count);
-            cqe_count = 0;
-        }
-        */
 
         return t.get_result();
     }

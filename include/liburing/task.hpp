@@ -9,101 +9,95 @@
 #include <liburing/stdlib_coroutine.hpp>
 
 namespace uio {
-template <typename T, bool nothrow>
+template <typename T, bool nothrow, bool entry_task, bool detached>
 struct task;
 
 // only for internal usage
-template <typename T, bool nothrow>
+template <typename T, bool nothrow, bool entry_task, bool detached>
 struct task_promise_base {
-    task<T, nothrow> get_return_object();
+    task<T, nothrow, entry_task, detached> get_return_object();
     auto initial_suspend() { return std::suspend_never(); }
     auto final_suspend() noexcept {
+        while (caller_state == NOT_READY) {}
         struct Awaiter: std::suspend_always {
-            task_promise_base *me_;
+            std::coroutine_handle<> continuation;
+            CallerState caller_state;
 
-            Awaiter(task_promise_base *me): me_(me) {};
-            std::coroutine_handle<> await_suspend(__attribute__((unused)) std::coroutine_handle<> caller) const noexcept {
-                if (__builtin_expect(me_->result_.index() == 3, false)) {
-                    // FIXME: destroy current coroutine; otherwise memory leaks.
-                    if (me_->waiter_) {
-                        me_->waiter_.destroy();
-                    }
-                    std::coroutine_handle<task_promise_base>::from_promise(*me_).destroy();
-                } else if (me_->waiter_) {
-                    fmt::print("final_suspend with waiter\n");
-                    return me_->waiter_;
+            Awaiter(std::coroutine_handle<> continuation, CallerState caller_state): continuation(continuation), caller_state(caller_state) {};
+            std::coroutine_handle<> await_suspend(__attribute__((unused)) std::coroutine_handle<> coro) const noexcept {
+                if (caller_state == READY_TO_RESUME) {
+                    return continuation;
                 }
-                fmt::print("final_suspend WITHOUT waiter\n");
+                if (caller_state == NO_CONTINUE) {
+                    // If we are not going to continue to the caller who will destroy us
+                    // we self destroys
+                    coro.destroy();
+                }
                 return std::noop_coroutine();
             }
         };
-        return Awaiter(this);
+        return Awaiter(waiter_, caller_state);
     }
     void unhandled_exception() {
         if constexpr (!nothrow) {
-            if (__builtin_expect(result_.index() == 3, false)) return;
             result_.template emplace<2>(std::current_exception());
         } else {
             __builtin_unreachable();
         }
     }
 
+    // NOT_READY: the caller has not provide the waiter_ or instruct not to resume yet
+    // READY_TO_RESUME: callee continue to caller, and caller destroy callee
+    // NO_CONTINUE: callee does not continue to caller, and callee destroy itself
+    // ENTRY_TASK: callee does not continue to caller, and caller destroy callee
+    enum CallerState {NOT_READY, READY_TO_RESUME, NO_CONTINUE, ENTRY_TASK};
+    CallerState caller_state {detached ? NO_CONTINUE : (entry_task ? ENTRY_TASK : NOT_READY)};
+
 protected:
-    friend struct task<T, nothrow>;
+    friend struct task<T, nothrow, entry_task, detached>;
     task_promise_base() = default;
     std::coroutine_handle<> waiter_;
     std::variant<
         std::monostate,
         std::conditional_t<std::is_void_v<T>, std::monostate, T>,
-        std::conditional_t<!nothrow, std::exception_ptr, std::monostate>,
-        std::monostate // indicates that the promise is detached
+        std::conditional_t<!nothrow, std::exception_ptr, std::monostate>
     > result_;
 };
 
 // only for internal usage
-template <typename T, bool nothrow>
-struct task_promise final: task_promise_base<T, nothrow> {
-    using task_promise_base<T, nothrow>::result_;
+template <typename T, bool nothrow, bool entry_task, bool detached>
+struct task_promise final: task_promise_base<T, nothrow, entry_task, detached> {
+    using task_promise_base<T, nothrow, entry_task, detached>::result_;
 
     template <typename U>
     void return_value(U&& u) {
-        if (__builtin_expect(result_.index() == 3, false)) return;
         result_.template emplace<1>(static_cast<U&&>(u));
     }
     void return_value(int u) {
-        if (__builtin_expect(result_.index() == 3, false)) return;
         result_.template emplace<1>(u);
     }
 };
 
-template <bool nothrow>
-struct task_promise<void, nothrow> final: task_promise_base<void, nothrow> {
-    using task_promise_base<void, nothrow>::result_;
+template <bool nothrow, bool entry_task, bool detached>
+struct task_promise<void, nothrow, entry_task, detached> final: task_promise_base<void, nothrow, entry_task, detached> {
+    using task_promise_base<void, nothrow, entry_task, detached>::result_;
 
     void return_void() {
-        if (__builtin_expect(result_.index() == 3, false)) return;
         result_.template emplace<1>(std::monostate {});
     }
 };
-
-void bt() {
-  void *array[10];
-  size_t size;
-
-  size = backtrace(array, 10);
-
-  backtrace_symbols_fd(array, size, STDERR_FILENO);
-}
 
 /**
  * An awaitable object that returned by an async function
  * @tparam T value type holded by this task
  * @tparam nothrow if true, the coroutine assigned by this task won't throw exceptions ( slightly better performance )
+ * @tparam entry_task if true, the coroutine does not continue to another coroutine after final_suspend
+ * @tparam detached if true, the coroutine does not continue to another coroutine after final_suspend and needs to destroy itself
  * @warning do NOT discard this object when returned by some function, or UB WILL happen
  */
-template <typename T = void, bool nothrow = false>
+template <typename T = void, bool nothrow = false, bool entry_task = false, bool detached = false>
 struct task final {
-    using promise_type = task_promise<T, nothrow>;
+    using promise_type = task_promise<T, nothrow, entry_task, detached>;
     using handle_t = std::coroutine_handle<promise_type>;
 
     task(const task&) = delete;
@@ -111,15 +105,21 @@ struct task final {
 
     bool await_ready() {
         auto& result_ = coro_.promise().result_;
-        return result_.index() > 0;
+        if (result_.index() > 0) {
+            static_cast<promise_type&>(coro_.promise()).caller_state = promise_type::NO_CONTINUE;
+            // if the result is immediately ready, we don't wait to destroy callee
+            // let callee destroy itself
+            destroy_callee = false;
+            return true;
+        } else {
+            return false;
+        }
     }
 
-    template <typename T_, bool nothrow_>
-    void await_suspend(std::coroutine_handle<task_promise<T_, nothrow_>> caller) noexcept {
-        fmt::print("provide waiter_, {}\n", caller.address());
-        // race condition can be more easily produced with this sleep
-        std::this_thread::sleep_for(std::chrono::nanoseconds(100000));
+    template <typename T_, bool nothrow_, bool entry_task_, bool detached_>
+    void await_suspend(std::coroutine_handle<task_promise<T_, nothrow_, entry_task_, detached_>> caller) noexcept {
         coro_.promise().waiter_ = caller;
+        static_cast<promise_type&>(coro_.promise()).caller_state = promise_type::READY_TO_RESUME;
     }
 
     T await_resume() const {
@@ -129,7 +129,6 @@ struct task final {
     /** Get the result hold by this task */
     T get_result() const {
         auto& result_ = coro_.promise().result_;
-        assert(result_.index() != 0);
         if constexpr (!nothrow) {
             if (auto* pep = std::get_if<2>(&result_)) {
                 std::rethrow_exception(*pep);
@@ -140,7 +139,6 @@ struct task final {
         }
     }
 
-    /** Get is the coroutine done */
     bool done() const {
         return coro_.done();
     }
@@ -160,23 +158,23 @@ struct task final {
 
     /** Destroy (when done) or detach (when not done) the task object */
     ~task() {
-        if (!coro_) return;
-        if (!coro_.done()) {
-            coro_.promise().result_.template emplace<3>(std::monostate{});
-        } else {
+        if (destroy_callee) {
             coro_.destroy();
         }
     }
 
 private:
-    friend struct task_promise_base<T, nothrow>;
+    friend struct task_promise_base<T, nothrow, entry_task, detached>;
     task(promise_type *p): coro_(handle_t::from_promise(*p)) {}
     handle_t coro_;
+
+    // if the callee is not detached, by default the task is responsible to destroy it
+    bool destroy_callee = !detached;
 };
 
-template <typename T, bool nothrow>
-task<T, nothrow> task_promise_base<T, nothrow>::get_return_object() {
-    return task<T, nothrow>(static_cast<task_promise<T, nothrow> *>(this));
+template <typename T, bool nothrow, bool entry_task, bool detached>
+task<T, nothrow, entry_task, detached> task_promise_base<T, nothrow, entry_task, detached>::get_return_object() {
+    return task<T, nothrow, entry_task, detached>(static_cast<task_promise<T, nothrow, entry_task, detached> *>(this));
 }
 
 } // namespace uio
