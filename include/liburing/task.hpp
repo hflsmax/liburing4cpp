@@ -137,19 +137,21 @@ struct task {
     // copy assignment
     task& operator =(const task&) = delete;
     // move constructor
-    task(task&&) = default;
-    // task(task&& other) noexcept {
-    //     coro_ = std::exchange(other.coro_, nullptr);
-    // }
+    task(task&& other) noexcept {
+        coro_ = std::exchange(other.coro_, nullptr);
+    }
     // move assignment
-    task& operator =(task&&) = default;
-    // task& operator =(task&& other) noexcept {
-    //     if (coro_) coro_.destroy();
-    //     coro_ = std::exchange(other.coro_, nullptr);
-    //     return *this;
-    // }
+    task& operator =(task&& other) noexcept {
+        if (coro_) coro_.destroy();
+        coro_ = std::exchange(other.coro_, nullptr);
+        return *this;
+    }
 
     ~task() {
+        if (!coro_) {
+            // this task has been moved to another
+            return;
+        }
         if (destroy_callee) {
             coro_.destroy();
         }
