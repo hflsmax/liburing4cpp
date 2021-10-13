@@ -642,40 +642,25 @@ public:
     io_uring_sqe* io_uring_get_sqe_safe() noexcept {
         sq_mutex.lock();
         auto* sqe = io_uring_get_sqe(&ring);
-        if (__builtin_expect(!!sqe, true)) {
-            return sqe;
-        } else {
-            printf_if_verbose(__FILE__ ": SQ is full, flushing %u cqe(s)\n", cqe_count);
-            io_uring_cq_advance(&ring, cqe_count);
-            cqe_count = 0;
-            io_uring_submit(&ring);
+        while (__builtin_expect(!sqe, false)) {
             sqe = io_uring_get_sqe(&ring);
-            if (__builtin_expect(!!sqe, true)) return sqe;
-            panic("io_uring_get_sqe", ENOMEM);
         }
+        return sqe;
     }
 
-    /** Wait for an event forever, blocking
-     * @see io_uring_wait_cqe
-     * @see io_uring_enter(2)
-     * @return a pair of promise pointer (used for resuming suspended coroutine) and retcode of finished command
-     */
-    template <typename T, bool nothrow, bool entry_task>
-    T run(const task<T, nothrow, entry_task>& t) noexcept(nothrow) {
-        ctpl::thread_pool p(2);
+    void run_scheduler() {
         std::thread submitter ([&](){
-            while (!t.done()) {
+            while (true) {
                 sq_mutex.lock();
                 io_uring_submit(&ring);
                 sq_mutex.unlock();
             }
         });
         std::thread resumer ([&](){
-            while (!t.done()) {
+            ctpl::thread_pool p(2);
+            while (true) {
                 io_uring_cqe *cqe;
                 unsigned head;
-
-                sq_mutex.lock();
                 
                 std::vector<std::coroutine_handle<>> handles_ready;
                 io_uring_for_each_cqe(&ring, head, cqe) {
@@ -695,16 +680,11 @@ public:
                         handle.resume();
                     });
                 }
-                
-                sq_mutex.unlock();
                 cqe_count = 0;
             }
         });
-        submitter.join();
-        resumer.join();
-
-
-        return t.get_result();
+        submitter.detach();
+        resumer.detach();
     }
 
 public:
